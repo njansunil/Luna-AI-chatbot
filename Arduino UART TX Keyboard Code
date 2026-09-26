@@ -1,0 +1,230 @@
+#include <SoftwareSerial.h>
+
+SoftwareSerial espSerial(12, 4);
+
+const byte keyPins[] = {2, 3, 5, 6, 7, 8, 9};
+const byte keyCount = 7;
+
+const char* groups[] = {
+  "ABCD0",
+  "EFGH1",
+  "IJKL2",
+  "MNOP3",
+  "QRST4",
+  "UVWX5",
+  "YZ6789"
+};
+
+const char symbols[] = "+-*/=";
+
+String inputText = "";
+
+bool caps = true;
+
+unsigned long lastTapTime[7] = {0};
+byte tapCount[7] = {0};
+
+const unsigned long debounceTime = 50;
+const unsigned long multiTapTime = 800;
+
+bool a5Pressed = false;
+unsigned long a5Start = 0;
+bool spaceDone = false;
+bool capsDone = false;
+
+bool d10Pressed = false;
+
+void setup() {
+  for (byte i = 0; i < keyCount; i++) {
+    pinMode(keyPins[i], INPUT_PULLUP);
+  }
+
+  pinMode(10, INPUT_PULLUP);
+
+  pinMode(A0, INPUT_PULLUP);
+  pinMode(A1, INPUT_PULLUP);
+  pinMode(A2, INPUT_PULLUP);
+  pinMode(A3, INPUT_PULLUP);
+  pinMode(A4, INPUT_PULLUP);
+  pinMode(A5, INPUT_PULLUP);
+
+  espSerial.begin(9600);
+}
+
+void loop() {
+  handleKeyboard();
+  handleA5();
+  handleD10();
+}
+
+void handleKeyboard() {
+  for (byte i = 0; i < keyCount; i++) {
+    if (digitalRead(keyPins[i]) == LOW) {
+      unsigned long now = millis();
+
+      if (now - lastTapTime[i] > debounceTime) {
+        if (now - lastTapTime[i] <= multiTapTime) {
+          tapCount[i]++;
+        } else {
+          tapCount[i] = 1;
+        }
+
+        lastTapTime[i] = now;
+
+        byte groupLength = strlen(groups[i]);
+        byte index = (tapCount[i] - 1) % groupLength;
+
+        char c = groups[i][index];
+
+        if (c >= 'A' && c <= 'Z' && !caps) {
+          c += 32;
+        }
+
+        if (tapCount[i] > 1) {
+          espSerial.write(0x08);
+
+          if (inputText.length() > 0) {
+            inputText.remove(inputText.length() - 1);
+          }
+        }
+
+        inputText += c;
+        espSerial.write(c);
+
+        while (digitalRead(keyPins[i]) == LOW) {
+          delay(1);
+        }
+      }
+    }
+  }
+
+  if (digitalRead(A0) == LOW) {
+    delay(debounceTime);
+
+    if (digitalRead(A0) == LOW) {
+      static byte symbolIndex = 0;
+
+      char c = symbols[symbolIndex];
+
+      inputText += c;
+      espSerial.write(c);
+
+      symbolIndex++;
+
+      if (symbolIndex >= 5) {
+        symbolIndex = 0;
+      }
+
+      while (digitalRead(A0) == LOW) {
+        delay(1);
+      }
+    }
+  }
+
+  if (digitalRead(A1) == LOW) {
+    delay(debounceTime);
+
+    if (digitalRead(A1) == LOW) {
+      espSerial.write(0x11);
+
+      while (digitalRead(A1) == LOW) {
+        delay(1);
+      }
+    }
+  }
+
+  if (digitalRead(A2) == LOW) {
+    delay(debounceTime);
+
+    if (digitalRead(A2) == LOW) {
+      espSerial.write(0x12);
+
+      while (digitalRead(A2) == LOW) {
+        delay(1);
+      }
+    }
+  }
+
+  if (digitalRead(A3) == LOW) {
+    delay(debounceTime);
+
+    if (digitalRead(A3) == LOW) {
+      espSerial.write(0x0D);
+
+      inputText = "";
+
+      for (byte i = 0; i < keyCount; i++) {
+        tapCount[i] = 0;
+        lastTapTime[i] = 0;
+      }
+
+      while (digitalRead(A3) == LOW) {
+        delay(1);
+      }
+    }
+  }
+
+  if (digitalRead(A4) == LOW) {
+    delay(debounceTime);
+
+    if (digitalRead(A4) == LOW) {
+      if (inputText.length() > 0) {
+        inputText.remove(inputText.length() - 1);
+      }
+
+      espSerial.write(0x08);
+
+      for (byte i = 0; i < keyCount; i++) {
+        tapCount[i] = 0;
+        lastTapTime[i] = 0;
+      }
+
+      while (digitalRead(A4) == LOW) {
+        delay(1);
+      }
+    }
+  }
+}
+
+void handleD10() {
+  bool pressed = digitalRead(10) == LOW;
+
+  if (pressed && !d10Pressed) {
+    d10Pressed = true;
+    espSerial.write(0x13);
+  }
+
+  if (!pressed) {
+    d10Pressed = false;
+  }
+}
+
+void handleA5() {
+  bool pressed = digitalRead(A5) == LOW;
+
+  if (pressed && !a5Pressed) {
+    a5Pressed = true;
+    a5Start = millis();
+    spaceDone = false;
+    capsDone = false;
+  }
+
+  if (pressed && a5Pressed) {
+    unsigned long held = millis() - a5Start;
+
+    if (held >= 3000 && !spaceDone) {
+      inputText += ' ';
+      espSerial.write(' ');
+      spaceDone = true;
+    }
+
+    if (held >= 6000 && !capsDone) {
+      caps = !caps;
+      capsDone = true;
+    }
+  }
+
+  if (!pressed && a5Pressed) {
+    a5Pressed = false;
+  }
+}
