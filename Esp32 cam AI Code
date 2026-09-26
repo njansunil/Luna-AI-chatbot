@@ -1,0 +1,438 @@
+#include <WiFi.h>
+#include <Wire.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <SoftwareSerial.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "esp_camera.h"
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C
+
+#define OLED_SDA 13
+#define OLED_SCL 14
+
+#define NANO_RX 12
+
+#define FLASH_LED 4
+
+const char* WIFI_SSID = "Your_ssid";
+const char* WIFI_PASSWORD = "Your_Wifi_password";
+
+const char* API_KEY = "YOUR_API_KEY_HERE";
+const char* API_URL = "https://api.openai.com/v1/responses";
+const char* AI_MODEL = "YOUR_MODEL_HERE";
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+HardwareSerial nanoSerial(1);
+
+String inputText = "";
+String conversationLines[200];
+
+int conversationCount = 0;
+int scrollOffset = 0;
+
+bool cameraBusy = false;
+
+void addConversation(String line) {
+  if (conversationCount < 200) {
+    conversationLines[conversationCount++] = line;
+  } else {
+    for (int i = 0; i < 199; i++) {
+      conversationLines[i] = conversationLines[i + 1];
+    }
+
+    conversationLines[199] = line;
+  }
+
+  scrollOffset = 0;
+}
+
+void showText(String text) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+
+  int start = 0;
+
+  while (start < text.length()) {
+    int end = start + 21;
+
+    if (end > text.length()) {
+      end = text.length();
+    }
+
+    display.println(text.substring(start, end));
+
+    if (display.getCursorY() >= 60) {
+      break;
+    }
+
+    start = end;
+  }
+
+  display.display();
+}
+
+void showStartup() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(15, 23);
+  display.println("Luna AI");
+  display.display();
+}
+
+void showWiFiStatus() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Luna AI");
+  display.println();
+  display.println("WiFi connected");
+  display.print("IP: ");
+  display.println(WiFi.localIP());
+  display.display();
+}
+
+void showConversation() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  int first = conversationCount - 6 - scrollOffset;
+
+  if (first < 0) {
+    first = 0;
+  }
+
+  int y = 0;
+
+  for (int i = first; i < conversationCount && y < 64; i++) {
+    String line = conversationLines[i];
+
+    int pos = 0;
+
+    while (pos < line.length() && y < 64) {
+      int end = pos + 21;
+
+      if (end > line.length()) {
+        end = line.length();
+      }
+
+      display.setCursor(0, y);
+      display.println(line.substring(pos, end));
+
+      y += 10;
+      pos = end;
+    }
+  }
+
+  display.display();
+}
+
+void showInput() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.println("Sunil:");
+
+  int start = 0;
+  int y = 12;
+
+  while (start < inputText.length() && y < 64) {
+    int end = start + 21;
+
+    if (end > inputText.length()) {
+      end = inputText.length();
+    }
+
+    display.setCursor(0, y);
+    display.println(inputText.substring(start, end));
+
+    start = end;
+    y += 10;
+  }
+
+  display.display();
+}
+
+void showStatus(String status) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Luna AI");
+  display.println();
+  display.println(status);
+  display.display();
+}
+
+bool captureCamera() {
+  if (cameraBusy) {
+    return false;
+  }
+
+  cameraBusy = true;
+
+  showStatus("Capturing...");
+
+  camera_fb_t* fb = esp_camera_fb_get();
+
+  if (!fb) {
+    showStatus("Camera error");
+    cameraBusy = false;
+    return false;
+  }
+
+  esp_camera_fb_return(fb);
+
+  cameraBusy = false;
+
+  return true;
+}
+
+String askAI(String message) {
+  if (String(API_KEY) == "YOUR_API_KEY_HERE") {
+    return "API key not configured.";
+  }
+
+  showStatus("Uploading...");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+
+  if (!http.begin(client, API_URL)) {
+    return "HTTP connection failed.";
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + API_KEY);
+
+  JsonDocument request;
+
+  request["model"] = AI_MODEL;
+  request["input"] = message;
+
+  JsonArray input = request["input"].to<JsonArray>();
+
+  JsonObject item = input.add<JsonObject>();
+  item["role"] = "user";
+
+  JsonArray content = item["content"].to<JsonArray>();
+
+  JsonObject textPart = content.add<JsonObject>();
+  textPart["type"] = "input_text";
+  textPart["text"] = message;
+
+  String body;
+  serializeJson(request, body);
+
+  int code = http.POST(body);
+
+  if (code <= 0) {
+    http.end();
+    return "Network error.";
+  }
+
+  String response = http.getString();
+
+  http.end();
+
+  if (code < 200 || code >= 300) {
+    return "AI error: " + String(code);
+  }
+
+  JsonDocument result;
+
+  DeserializationError error = deserializeJson(result, response);
+
+  if (error) {
+    return "Invalid AI response.";
+  }
+
+  String output = "";
+
+  if (result["output"][0]["content"][0]["text"].is<String>()) {
+    output = result["output"][0]["content"][0]["text"].as<String>();
+  }
+
+  if (output.length() == 0) {
+    output = "No response.";
+  }
+
+  return output;
+}
+
+void sendMessage() {
+  if (inputText.length() == 0) {
+    return;
+  }
+
+  String message = inputText;
+
+  addConversation("Sunil: " + message);
+
+  inputText = "";
+
+  showStatus("Sending...");
+
+  String answer = askAI(message);
+
+  addConversation("Luna: " + answer);
+
+  showConversation();
+}
+
+void handleNano() {
+  while (nanoSerial.available()) {
+    uint8_t c = nanoSerial.read();
+
+    if (c == 0x08) {
+      if (inputText.length() > 0) {
+        inputText.remove(inputText.length() - 1);
+      }
+
+      showInput();
+    }
+
+    else if (c == 0x0D) {
+      sendMessage();
+    }
+
+    else if (c == 0x11) {
+      if (conversationCount > 0) {
+        scrollOffset++;
+
+        int maxScroll = conversationCount - 6;
+
+        if (maxScroll < 0) {
+          maxScroll = 0;
+        }
+
+        if (scrollOffset > maxScroll) {
+          scrollOffset = maxScroll;
+        }
+
+        showConversation();
+      }
+    }
+
+    else if (c == 0x12) {
+      if (scrollOffset > 0) {
+        scrollOffset--;
+      }
+
+      showConversation();
+    }
+
+    else if (c == 0x13) {
+      captureCamera();
+      showConversation();
+    }
+
+    else if (c >= 32 && c <= 126) {
+      inputText += (char)c;
+      showInput();
+    }
+  }
+}
+
+void setupCamera() {
+  camera_config_t config;
+
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+
+  config.pin_d0 = 5;
+  config.pin_d1 = 18;
+  config.pin_d2 = 19;
+  config.pin_d3 = 21;
+  config.pin_d4 = 36;
+  config.pin_d5 = 39;
+  config.pin_d6 = 34;
+  config.pin_d7 = 35;
+
+  config.pin_xclk = 0;
+  config.pin_pclk = 22;
+  config.pin_vsync = 25;
+  config.pin_href = 23;
+  config.pin_sscb_sda = 26;
+  config.pin_sscb_scl = 27;
+  config.pin_pwdn = 32;
+  config.pin_reset = -1;
+
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+
+  if (psramFound()) {
+    config.frame_size = FRAMESIZE_VGA;
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+
+  esp_camera_init(&config);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  nanoSerial.begin(
+    9600,
+    SERIAL_8N1,
+    NANO_RX,
+    -1
+  );
+
+  Wire.begin(
+    OLED_SDA,
+    OLED_SCL
+  );
+
+  display.begin(
+    SSD1306_SWITCHCAPVCC,
+    OLED_ADDR
+  );
+
+  showStartup();
+
+  setupCamera();
+
+  WiFi.begin(
+    WIFI_SSID,
+    WIFI_PASSWORD
+  );
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+  }
+
+  showWiFiStatus();
+
+  delay(2000);
+
+  showConversation();
+}
+
+void loop() {
+  handleNano();
+}
